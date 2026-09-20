@@ -87,4 +87,36 @@ function getVisitStats(email) {
   };
 }
 
-module.exports = { loadUserData, saveUserData, logVisit, getVisitStats };
+// ===== 관리자용: 전체 사용자 개요 =====
+function getAllUsersOverview() {
+  const users = db.prepare('SELECT email, data, created_at, updated_at FROM users ORDER BY created_at DESC').all();
+  const visitCounts = db.prepare('SELECT email, COUNT(*) as cnt, MAX(ts) as last_ts FROM visits GROUP BY email').all();
+  const visitMap = {};
+  for (const v of visitCounts) visitMap[v.email] = { count: v.cnt, lastVisit: v.last_ts };
+
+  return users.map(u => {
+    let completedTotal = 0;
+    try {
+      const parsed = JSON.parse(u.data);
+      if (parsed.completedByLevel) {
+        completedTotal = Object.values(parsed.completedByLevel).reduce((sum, arr) => sum + (arr?.length || 0), 0);
+      }
+    } catch (e) { /* 무시 */ }
+    return {
+      email: u.email,
+      createdAt: u.created_at,
+      updatedAt: u.updated_at,
+      visitCount: visitMap[u.email]?.count || 0,
+      lastVisit: visitMap[u.email]?.lastVisit || null,
+      completedTotal,
+    };
+  });
+}
+
+function getTotalStats() {
+  const totalUsers = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
+  const totalVisits = db.prepare('SELECT COUNT(*) as c FROM visits').get().c;
+  return { totalUsers, totalVisits };
+}
+
+module.exports = { loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats };
