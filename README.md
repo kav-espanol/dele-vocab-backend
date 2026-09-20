@@ -1,4 +1,4 @@
-[README.md](https://github.com/user-attachments/files/32429077/README.md)
+[README.md](https://github.com/user-attachments/files/32429169/README.md)
 # DELE Planner 단어장 - 이메일 인증 백엔드
 
 프론트엔드(vocab-study-app.html)의 "인증번호 받기" 기능을 실제로 작동시키는 서버입니다.
