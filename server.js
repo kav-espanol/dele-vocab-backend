@@ -163,5 +163,108 @@ app.get('/api/stats', (req, res) => {
   res.json({ ok: true, ...stats, shouldSuggestPlanner });
 });
 
+// ===== 7) 관리자 페이지: 가입자 · 방문 데이터 확인 =====
+// 브라우저에서 [배포주소]/admin?key=[ADMIN_KEY 환경변수 값] 으로 접속하면 됩니다.
+// 아무나 못 보게 비밀키로 막아뒀어요 — Render 환경변수에 ADMIN_KEY를 꼭 설정하세요.
+// ===== 8) CSV 내보내기: 구글시트에서 IMPORTDATA로 불러올 수 있는 주소 =====
+// 구글시트 셀에 이렇게 입력하면 이 데이터를 그대로 가져와서 표로 만들어줍니다:
+//   =IMPORTDATA("https://[배포주소]/admin/export.csv?key=[ADMIN_KEY]")
+// 구글시트가 몇 시간마다 자동으로 새로고침하고, 시트 메뉴에서 수동 새로고침도 가능합니다.
+app.get('/admin/export.csv', (req, res) => {
+  const key = String(req.query.key || '');
+  const expected = process.env.ADMIN_KEY;
+
+  if (!expected || key !== expected) {
+    return res.status(401).send('unauthorized');
+  }
+
+  const users = db.getAllUsersOverview();
+
+  const escapeCsv = (val) => {
+    const s = String(val ?? '');
+    return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
+  };
+
+  const header = ['이메일', '가입일', '방문횟수', '학습완료단어수', '마지막방문'];
+  const lines = [header.join(',')];
+  for (const u of users) {
+    lines.push([
+      escapeCsv(u.email),
+      escapeCsv(u.createdAt ? u.createdAt.slice(0, 16).replace('T', ' ') : ''),
+      escapeCsv(u.visitCount),
+      escapeCsv(u.completedTotal),
+      escapeCsv(u.lastVisit ? u.lastVisit.slice(0, 16).replace('T', ' ') : ''),
+    ].join(','));
+  }
+
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.send('\uFEFF' + lines.join('\n')); // BOM 추가: 한글 깨짐 방지
+});
+
+app.get('/admin', (req, res) => {
+  const key = String(req.query.key || '');
+  const expected = process.env.ADMIN_KEY;
+
+  if (!expected) {
+    return res.status(500).send('서버에 ADMIN_KEY 환경변수가 설정되어 있지 않습니다. Render Environment에 추가해주세요.');
+  }
+  if (key !== expected) {
+    return res.status(401).send(`
+      <div style="font-family:sans-serif; max-width:400px; margin:60px auto; text-align:center;">
+        <h3>관리자 페이지</h3>
+        <p style="color:#888;">비밀키를 URL 뒤에 붙여서 접속하세요.<br>예: /admin?key=여기에비밀키</p>
+      </div>
+    `);
+  }
+
+  const totals = db.getTotalStats();
+  const users = db.getAllUsersOverview();
+
+  const rows = users.map(u => `
+    <tr>
+      <td>${u.email}</td>
+      <td>${u.visitCount}</td>
+      <td>${u.completedTotal}</td>
+      <td>${u.createdAt ? u.createdAt.slice(0, 16).replace('T', ' ') : '-'}</td>
+      <td>${u.lastVisit ? u.lastVisit.slice(0, 16).replace('T', ' ') : '-'}</td>
+    </tr>
+  `).join('');
+
+  res.send(`
+    <!DOCTYPE html>
+    <html lang="ko">
+    <head>
+      <meta charset="UTF-8">
+      <title>단어장 관리자</title>
+      <style>
+        body{ font-family:-apple-system,sans-serif; max-width:900px; margin:40px auto; padding:0 20px; color:#111; }
+        h1{ font-size:20px; }
+        .stats{ display:flex; gap:16px; margin:20px 0 30px; }
+        .stat-box{ background:#EEF2FF; border-radius:12px; padding:16px 20px; }
+        .stat-num{ font-size:24px; font-weight:700; color:#1E40AF; }
+        .stat-label{ font-size:13px; color:#666; }
+        table{ width:100%; border-collapse:collapse; font-size:14px; }
+        th, td{ text-align:left; padding:10px 12px; border-bottom:1px solid #eee; }
+        th{ background:#f5f5f4; font-weight:600; }
+      </style>
+    </head>
+    <body>
+      <h1>📚 단어장 관리자 페이지</h1>
+      <p style="margin:-10px 0 20px;"><a href="/admin/export.csv?key=${key}" style="color:#2563EB;">CSV로 내보내기 (구글시트 연결용)</a></p>
+      <div class="stats">
+        <div class="stat-box"><div class="stat-num">${totals.totalUsers}</div><div class="stat-label">총 가입자</div></div>
+        <div class="stat-box"><div class="stat-num">${totals.totalVisits}</div><div class="stat-label">총 방문 횟수</div></div>
+      </div>
+      <table>
+        <thead>
+          <tr><th>이메일</th><th>방문 횟수</th><th>학습 완료 단어 수</th><th>가입일</th><th>마지막 방문</th></tr>
+        </thead>
+        <tbody>${rows || '<tr><td colspan="5" style="text-align:center; color:#999;">아직 가입자가 없습니다</td></tr>'}</tbody>
+      </table>
+    </body>
+    </html>
+  `);
+});
+
 const PORT = process.env.PORT || 3000;
 app.listen(PORT, () => console.log(`서버 실행 중: http://localhost:${PORT}`));
