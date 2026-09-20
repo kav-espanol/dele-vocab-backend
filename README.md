@@ -1,3 +1,4 @@
+[README.md](https://github.com/user-attachments/files/32428821/README.md)
 # DELE Planner 단어장 - 이메일 인증 백엔드
 
 프론트엔드(vocab-study-app.html)의 "인증번호 받기" 기능을 실제로 작동시키는 서버입니다.
@@ -62,6 +63,7 @@ DNS 전파는 보통 몇 분~1시간 정도 걸립니다.
 | `GET /api/sync/load?email=...` | 학습 진행 상황 불러오기 (다른 기기에서도 이어서 학습 가능) |
 | `POST /api/log-visit` | 로그인할 때마다 방문 시각 기록 |
 | `GET /api/stats?email=...` | 방문 횟수·활동일수 집계 + DELE Planner 제안 여부(`shouldSuggestPlanner`) 판단 |
+| `GET /admin?key=...` | 가입자 목록 + 방문/학습 통계를 표로 보여주는 관리자 페이지 (비밀키로 보호됨) |
 
 방문 기록과 학습 데이터는 `data.sqlite` 파일 하나에 저장됩니다 (별도 DB 서버 필요 없음).
 
