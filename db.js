@@ -1,66 +1,66 @@
 // db.js
-// 사용자별 학습 진행 상황 + 방문 기록을 저장하는 아주 단순한 SQLite 저장소.
+// 사용자별 학습 진행 상황 + 방문 기록을 저장하는 아주 단순한 저장소.
 //
-// 파일 하나(data.sqlite)에 전부 저장됩니다. 별도의 DB 서버를 띄울 필요가 없어서
-// 프로토타입 단계에는 충분하지만, 무료 호스팅(Render 무료 플랜 등)은
-// 재배포할 때 디스크가 초기화될 수 있다는 점은 알아두세요.
-// 사용자가 늘어나면 Postgres 같은 실제 DB로 옮기는 걸 권장합니다 —
-// 이 파일의 함수 이름(getUser/saveUser/logVisit 등)만 유지하면
-// 나머지 서버 코드는 거의 손댈 필요가 없습니다.
+// 원래는 better-sqlite3(네이티브 모듈)를 썼는데, Render 서버 환경에서
+// 컴파일 불일치로 계속 충돌이 나서 순수 JS(JSON 파일) 방식으로 바꿨습니다.
+// 네이티브 모듈이 아니라서 "npm install만 되면 어디서든 100% 동일하게 동작"하는
+// 게 장점이에요. 지금 규모(개인 프로젝트)에는 이 정도로 충분합니다.
+//
+// 데이터는 파일 하나(data.json)에 저장됩니다. 다른 함수 이름은 이전과
+// 완전히 동일해서, 이 파일만 바꿔도 server.js는 전혀 손댈 필요가 없습니다.
 
-const Database = require('better-sqlite3');
+const fs = require('fs');
 const path = require('path');
 
-const db = new Database(path.join(__dirname, 'data.sqlite'));
-db.pragma('journal_mode = WAL');
+const DATA_FILE = path.join(__dirname, 'data.json');
 
-db.exec(`
-  CREATE TABLE IF NOT EXISTS users (
-    email TEXT PRIMARY KEY,
-    data TEXT NOT NULL,          -- JSON: { attendance: [...], completedByLevel: {...} }
-    created_at TEXT NOT NULL,
-    updated_at TEXT NOT NULL
-  );
+function loadDB() {
+  if (!fs.existsSync(DATA_FILE)) {
+    return { users: {}, visits: [] };
+  }
+  try {
+    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+  } catch (e) {
+    console.error('data.json 읽기 실패, 새로 시작합니다:', e.message);
+    return { users: {}, visits: [] };
+  }
+}
 
-  CREATE TABLE IF NOT EXISTS visits (
-    id INTEGER PRIMARY KEY AUTOINCREMENT,
-    email TEXT NOT NULL,
-    ts TEXT NOT NULL,            -- ISO 타임스탬프
-    hour INTEGER NOT NULL        -- 0-23, 시간대 분석용
-  );
-
-  CREATE INDEX IF NOT EXISTS idx_visits_email ON visits(email);
-`);
+function saveDB(db) {
+  fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf-8');
+}
 
 function nowISO() { return new Date().toISOString(); }
 
 // ===== 사용자 데이터 (진행 상황) =====
 function loadUserData(email) {
-  const row = db.prepare('SELECT data FROM users WHERE email = ?').get(email);
-  return row ? JSON.parse(row.data) : null;
+  const db = loadDB();
+  const user = db.users[email];
+  return user ? user.data : null;
 }
 
 function saveUserData(email, data) {
-  const json = JSON.stringify(data);
-  const existing = db.prepare('SELECT email FROM users WHERE email = ?').get(email);
-  if (existing) {
-    db.prepare('UPDATE users SET data = ?, updated_at = ? WHERE email = ?')
-      .run(json, nowISO(), email);
-  } else {
-    db.prepare('INSERT INTO users (email, data, created_at, updated_at) VALUES (?, ?, ?, ?)')
-      .run(email, json, nowISO(), nowISO());
-  }
+  const db = loadDB();
+  const existing = db.users[email];
+  db.users[email] = {
+    data,
+    createdAt: existing ? existing.createdAt : nowISO(),
+    updatedAt: nowISO(),
+  };
+  saveDB(db);
 }
 
 // ===== 방문 기록 =====
 function logVisit(email) {
+  const db = loadDB();
   const now = new Date();
-  db.prepare('INSERT INTO visits (email, ts, hour) VALUES (?, ?, ?)')
-    .run(email, now.toISOString(), now.getHours());
+  db.visits.push({ email, ts: now.toISOString(), hour: now.getHours() });
+  saveDB(db);
 }
 
 function getVisitStats(email) {
-  const visits = db.prepare('SELECT ts, hour FROM visits WHERE email = ? ORDER BY ts ASC').all(email);
+  const db = loadDB();
+  const visits = db.visits.filter(v => v.email === email).sort((a, b) => a.ts.localeCompare(b.ts));
 
   const buckets = { 아침: 0, 오전: 0, 오후: 0, 저녁: 0, 밤: 0 };
   for (const v of visits) {
@@ -89,34 +89,41 @@ function getVisitStats(email) {
 
 // ===== 관리자용: 전체 사용자 개요 =====
 function getAllUsersOverview() {
-  const users = db.prepare('SELECT email, data, created_at, updated_at FROM users ORDER BY created_at DESC').all();
-  const visitCounts = db.prepare('SELECT email, COUNT(*) as cnt, MAX(ts) as last_ts FROM visits GROUP BY email').all();
-  const visitMap = {};
-  for (const v of visitCounts) visitMap[v.email] = { count: v.cnt, lastVisit: v.last_ts };
+  const db = loadDB();
+  const emails = Object.keys(db.users).sort((a, b) =>
+    (db.users[b].createdAt || '').localeCompare(db.users[a].createdAt || '')
+  );
 
-  return users.map(u => {
+  return emails.map(email => {
+    const user = db.users[email];
+    const userVisits = db.visits.filter(v => v.email === email);
+    const lastVisit = userVisits.length
+      ? userVisits.map(v => v.ts).sort().slice(-1)[0]
+      : null;
+
     let completedTotal = 0;
-    try {
-      const parsed = JSON.parse(u.data);
-      if (parsed.completedByLevel) {
-        completedTotal = Object.values(parsed.completedByLevel).reduce((sum, arr) => sum + (arr?.length || 0), 0);
-      }
-    } catch (e) { /* 무시 */ }
+    if (user.data && user.data.completedByLevel) {
+      completedTotal = Object.values(user.data.completedByLevel)
+        .reduce((sum, arr) => sum + (arr?.length || 0), 0);
+    }
+
     return {
-      email: u.email,
-      createdAt: u.created_at,
-      updatedAt: u.updated_at,
-      visitCount: visitMap[u.email]?.count || 0,
-      lastVisit: visitMap[u.email]?.lastVisit || null,
+      email,
+      createdAt: user.createdAt,
+      updatedAt: user.updatedAt,
+      visitCount: userVisits.length,
+      lastVisit,
       completedTotal,
     };
   });
 }
 
 function getTotalStats() {
-  const totalUsers = db.prepare('SELECT COUNT(*) as c FROM users').get().c;
-  const totalVisits = db.prepare('SELECT COUNT(*) as c FROM visits').get().c;
-  return { totalUsers, totalVisits };
+  const db = loadDB();
+  return {
+    totalUsers: Object.keys(db.users).length,
+    totalVisits: db.visits.length,
+  };
 }
 
 module.exports = { loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats };
