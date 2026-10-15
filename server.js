@@ -41,6 +41,12 @@ function generateCode() {
   return String(Math.floor(100000 + Math.random() * 900000)); // 6자리
 }
 
+// 관리자 화면/CSV에 표시하는 시각은 한국 시간(KST, UTC+9)으로 변환합니다. (한국은 서머타임이 없어 +9시간 고정)
+function toKST(iso) {
+  if (!iso) return '';
+  return new Date(new Date(iso).getTime() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ');
+}
+
 function isValidEmail(email) {
   return typeof email === 'string' && /^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(email);
 }
@@ -216,10 +222,10 @@ app.get('/admin/export.csv', async (req, res) => {
   for (const u of users) {
     lines.push([
       escapeCsv(u.email),
-      escapeCsv(u.createdAt ? u.createdAt.slice(0, 16).replace('T', ' ') : ''),
+      escapeCsv(toKST(u.createdAt)),
       escapeCsv(u.visitCount),
       escapeCsv(u.completedTotal),
-      escapeCsv(u.lastVisit ? u.lastVisit.slice(0, 16).replace('T', ' ') : ''),
+      escapeCsv(toKST(u.lastVisit)),
     ].join(','));
   }
 
@@ -257,8 +263,8 @@ app.get('/admin', async (req, res) => {
       <td>${u.email}</td>
       <td>${u.visitCount}</td>
       <td>${u.completedTotal}</td>
-      <td>${u.createdAt ? u.createdAt.slice(0, 16).replace('T', ' ') : '-'}</td>
-      <td>${u.lastVisit ? u.lastVisit.slice(0, 16).replace('T', ' ') : '-'}</td>
+      <td>${toKST(u.createdAt) || '-'}</td>
+      <td>${toKST(u.lastVisit) || '-'}</td>
     </tr>
   `).join('');
 
