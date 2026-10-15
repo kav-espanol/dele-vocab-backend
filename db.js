@@ -1,66 +1,125 @@
 // db.js
-// 사용자별 학습 진행 상황 + 방문 기록을 저장하는 아주 단순한 저장소.
+// 사용자별 학습 진행 상황 + 방문 기록을 저장하는 저장소 (PostgreSQL).
 //
-// 원래는 better-sqlite3(네이티브 모듈)를 썼는데, Render 서버 환경에서
-// 컴파일 불일치로 계속 충돌이 나서 순수 JS(JSON 파일) 방식으로 바꿨습니다.
-// 네이티브 모듈이 아니라서 "npm install만 되면 어디서든 100% 동일하게 동작"하는
-// 게 장점이에요. 지금 규모(개인 프로젝트)에는 이 정도로 충분합니다.
+// 이전에는 서버 안의 data.json 파일에 저장했는데, Render 무료 서버는
+// 재시작/재배포 때 파일이 초기화될 수 있어서 데이터가 사라질 위험이 있었습니다.
+// 이제 서버 바깥(Neon 등)의 Postgres에 저장하므로 서버가 재시작되어도 유지됩니다.
 //
-// 데이터는 파일 하나(data.json)에 저장됩니다. 다른 함수 이름은 이전과
-// 완전히 동일해서, 이 파일만 바꿔도 server.js는 전혀 손댈 필요가 없습니다.
+// 필요한 환경변수: DATABASE_URL  (postgresql://... 형태의 접속 주소)
+//
+// 함수 이름과 반환 형태는 이전 버전과 같고, 전부 async(Promise)로 바뀌었습니다.
 
 const fs = require('fs');
 const path = require('path');
+const { Pool } = require('pg');
 
-const DATA_FILE = path.join(__dirname, 'data.json');
+if (!process.env.DATABASE_URL) {
+  console.error('DATABASE_URL 환경변수가 없습니다. Neon 접속 주소를 설정해주세요.');
+}
 
-function loadDB() {
-  if (!fs.existsSync(DATA_FILE)) {
-    return { users: {}, visits: [] };
-  }
+const pool = new Pool({
+  connectionString: process.env.DATABASE_URL,
+  max: 5,
+  idleTimeoutMillis: 30000,
+});
+// 유휴 연결이 끊겨도 서버가 죽지 않도록
+pool.on('error', (err) => console.error('DB 풀 오류:', err.message));
+
+const LEGACY_FILE = path.join(__dirname, 'data.json');
+
+// ===== 테이블 준비 + (있다면) 기존 data.json 1회 이전 =====
+async function init() {
+  await pool.query(`
+    CREATE TABLE IF NOT EXISTS users (
+      email       TEXT PRIMARY KEY,
+      data        JSONB,
+      created_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      updated_at  TIMESTAMPTZ NOT NULL DEFAULT now(),
+      restored    BOOLEAN NOT NULL DEFAULT FALSE,
+      consent_at  TIMESTAMPTZ
+    );
+    CREATE TABLE IF NOT EXISTS visits (
+      id     BIGSERIAL PRIMARY KEY,
+      email  TEXT NOT NULL,
+      ts     TIMESTAMPTZ NOT NULL DEFAULT now(),
+      hour   SMALLINT NOT NULL
+    );
+    CREATE INDEX IF NOT EXISTS visits_email_idx ON visits (email);
+  `);
+  await importLegacyFileOnce();
+}
+
+// 서버 폴더에 예전 data.json이 남아 있고, DB가 비어 있을 때만 한 번 옮깁니다.
+async function importLegacyFileOnce() {
+  if (!fs.existsSync(LEGACY_FILE)) return;
+  const { rows } = await pool.query('SELECT COUNT(*)::int AS n FROM users');
+  if (rows[0].n > 0) return;
+
+  let legacy;
   try {
-    return JSON.parse(fs.readFileSync(DATA_FILE, 'utf-8'));
+    legacy = JSON.parse(fs.readFileSync(LEGACY_FILE, 'utf-8'));
   } catch (e) {
-    console.error('data.json 읽기 실패, 새로 시작합니다:', e.message);
-    return { users: {}, visits: [] };
+    console.error('data.json 이전 실패(읽기 오류):', e.message);
+    return;
+  }
+
+  const client = await pool.connect();
+  let u = 0, v = 0;
+  try {
+    await client.query('BEGIN');
+    for (const [email, user] of Object.entries(legacy.users || {})) {
+      await client.query(
+        `INSERT INTO users (email, data, created_at, updated_at)
+         VALUES ($1, $2, $3, $4) ON CONFLICT (email) DO NOTHING`,
+        [email, user.data ?? null, user.createdAt || new Date().toISOString(), user.updatedAt || new Date().toISOString()]
+      );
+      u++;
+    }
+    for (const visit of legacy.visits || []) {
+      await client.query(
+        'INSERT INTO visits (email, ts, hour) VALUES ($1, $2, $3)',
+        [visit.email, visit.ts, visit.hour]
+      );
+      v++;
+    }
+    await client.query('COMMIT');
+    console.log(`기존 data.json 이전 완료: 사용자 ${u}명, 방문 ${v}건`);
+  } catch (e) {
+    await client.query('ROLLBACK');
+    console.error('data.json 이전 실패(롤백):', e.message);
+  } finally {
+    client.release();
   }
 }
-
-function saveDB(db) {
-  fs.writeFileSync(DATA_FILE, JSON.stringify(db, null, 2), 'utf-8');
-}
-
-function nowISO() { return new Date().toISOString(); }
 
 // ===== 사용자 데이터 (진행 상황) =====
-function loadUserData(email) {
-  const db = loadDB();
-  const user = db.users[email];
-  return user ? user.data : null;
+async function loadUserData(email) {
+  const { rows } = await pool.query('SELECT data FROM users WHERE email = $1', [email]);
+  return rows[0] ? rows[0].data : null;
 }
 
-function saveUserData(email, data) {
-  const db = loadDB();
-  const existing = db.users[email];
-  db.users[email] = {
-    data,
-    createdAt: existing ? existing.createdAt : nowISO(),
-    updatedAt: nowISO(),
-  };
-  saveDB(db);
+async function saveUserData(email, data) {
+  await pool.query(
+    `INSERT INTO users (email, data) VALUES ($1, $2)
+     ON CONFLICT (email) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
+    [email, data]
+  );
 }
 
 // ===== 방문 기록 =====
-function logVisit(email) {
-  const db = loadDB();
+// hour는 이전과 동일하게 서버 시간대 기준입니다 (동작 변경 없음).
+async function logVisit(email) {
   const now = new Date();
-  db.visits.push({ email, ts: now.toISOString(), hour: now.getHours() });
-  saveDB(db);
+  await pool.query('INSERT INTO visits (email, ts, hour) VALUES ($1, $2, $3)', [
+    email, now.toISOString(), now.getHours(),
+  ]);
 }
 
-function getVisitStats(email) {
-  const db = loadDB();
-  const visits = db.visits.filter(v => v.email === email).sort((a, b) => a.ts.localeCompare(b.ts));
+async function getVisitStats(email) {
+  const { rows: visits } = await pool.query(
+    'SELECT ts, hour FROM visits WHERE email = $1 ORDER BY ts ASC',
+    [email]
+  );
 
   const buckets = { 아침: 0, 오전: 0, 오후: 0, 저녁: 0, 밤: 0 };
   for (const v of visits) {
@@ -76,54 +135,54 @@ function getVisitStats(email) {
     mostActiveTimeBucket = Object.entries(buckets).sort((a, b) => b[1] - a[1])[0][0];
   }
 
-  const uniqueDays = new Set(visits.map(v => v.ts.slice(0, 10)));
+  const uniqueDays = new Set(visits.map(v => v.ts.toISOString().slice(0, 10)));
 
   return {
     visitCount: visits.length,
     activeDayCount: uniqueDays.size,
     mostActiveTimeBucket,
-    firstVisit: visits[0]?.ts || null,
-    lastVisit: visits[visits.length - 1]?.ts || null,
+    firstVisit: visits[0] ? visits[0].ts.toISOString() : null,
+    lastVisit: visits.length ? visits[visits.length - 1].ts.toISOString() : null,
   };
 }
 
 // ===== 관리자용: 전체 사용자 개요 =====
-function getAllUsersOverview() {
-  const db = loadDB();
-  const emails = Object.keys(db.users).sort((a, b) =>
-    (db.users[b].createdAt || '').localeCompare(db.users[a].createdAt || '')
-  );
+async function getAllUsersOverview() {
+  const { rows } = await pool.query(`
+    SELECT u.email, u.created_at, u.updated_at, u.data,
+           COALESCE(v.cnt, 0)::int AS visit_count,
+           v.last_ts
+    FROM users u
+    LEFT JOIN (
+      SELECT email, COUNT(*) AS cnt, MAX(ts) AS last_ts FROM visits GROUP BY email
+    ) v ON v.email = u.email
+    ORDER BY u.created_at DESC
+  `);
 
-  return emails.map(email => {
-    const user = db.users[email];
-    const userVisits = db.visits.filter(v => v.email === email);
-    const lastVisit = userVisits.length
-      ? userVisits.map(v => v.ts).sort().slice(-1)[0]
-      : null;
-
+  return rows.map(r => {
     let completedTotal = 0;
-    if (user.data && user.data.completedByLevel) {
-      completedTotal = Object.values(user.data.completedByLevel)
-        .reduce((sum, arr) => sum + (arr?.length || 0), 0);
+    if (r.data && r.data.completedByLevel) {
+      completedTotal = Object.values(r.data.completedByLevel)
+        .reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
     }
-
     return {
-      email,
-      createdAt: user.createdAt,
-      updatedAt: user.updatedAt,
-      visitCount: userVisits.length,
-      lastVisit,
+      email: r.email,
+      createdAt: r.created_at.toISOString(),
+      updatedAt: r.updated_at.toISOString(),
+      visitCount: r.visit_count,
+      lastVisit: r.last_ts ? r.last_ts.toISOString() : null,
       completedTotal,
     };
   });
 }
 
-function getTotalStats() {
-  const db = loadDB();
-  return {
-    totalUsers: Object.keys(db.users).length,
-    totalVisits: db.visits.length,
-  };
+async function getTotalStats() {
+  const u = await pool.query('SELECT COUNT(*)::int AS n FROM users');
+  const v = await pool.query('SELECT COUNT(*)::int AS n FROM visits');
+  return { totalUsers: u.rows[0].n, totalVisits: v.rows[0].n };
 }
 
-module.exports = { loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats };
+module.exports = {
+  init, pool,
+  loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats,
+};

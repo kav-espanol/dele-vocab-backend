@@ -120,47 +120,67 @@ app.get('/api/health', (req, res) => res.json({ ok: true }));
 
 // ===== 3) 진행 상황 저장 (학습 완료 단어, 출석 기록) =====
 // 프론트엔드가 saveProgress() 할 때마다 통째로 덮어씁니다.
-app.post('/api/sync/save', (req, res) => {
+app.post('/api/sync/save', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   if (!isValidEmail(email)) {
     return res.status(400).json({ ok: false, error: 'INVALID_EMAIL' });
   }
-  db.saveUserData(email, req.body.data || {});
-  res.json({ ok: true });
+  try {
+    await db.saveUserData(email, req.body.data || {});
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('저장 실패:', e.message);
+    res.status(500).json({ ok: false, error: 'DB_ERROR' });
+  }
 });
 
 // ===== 4) 진행 상황 불러오기 =====
-app.get('/api/sync/load', (req, res) => {
+app.get('/api/sync/load', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
   if (!isValidEmail(email)) {
     return res.status(400).json({ ok: false, error: 'INVALID_EMAIL' });
   }
-  const data = db.loadUserData(email);
-  res.json({ ok: true, data }); // data는 처음 로그인이면 null
+  try {
+    const data = await db.loadUserData(email);
+    res.json({ ok: true, data }); // data는 처음 로그인이면 null
+  } catch (e) {
+    console.error('불러오기 실패:', e.message);
+    res.status(500).json({ ok: false, error: 'DB_ERROR' });
+  }
 });
 
 // ===== 5) 방문 기록 (로그인할 때마다 호출) =====
-app.post('/api/log-visit', (req, res) => {
+app.post('/api/log-visit', async (req, res) => {
   const email = String(req.body.email || '').trim().toLowerCase();
   if (!isValidEmail(email)) {
     return res.status(400).json({ ok: false, error: 'INVALID_EMAIL' });
   }
-  db.logVisit(email);
-  res.json({ ok: true });
+  try {
+    await db.logVisit(email);
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('방문 기록 실패:', e.message);
+    res.status(500).json({ ok: false, error: 'DB_ERROR' });
+  }
 });
 
 // ===== 6) 방문 통계 + DELE Planner 제안 여부 =====
 // 방문 횟수/활동 일수를 보고 서버가 직접 판단합니다.
 // (지금은 간단한 규칙이지만, 나중에 더 정교한 조건으로 바꿔도
 //  프론트엔드는 이 엔드포인트만 그대로 호출하면 됩니다.)
-app.get('/api/stats', (req, res) => {
+app.get('/api/stats', async (req, res) => {
   const email = String(req.query.email || '').trim().toLowerCase();
   if (!isValidEmail(email)) {
     return res.status(400).json({ ok: false, error: 'INVALID_EMAIL' });
   }
-  const stats = db.getVisitStats(email);
-  const shouldSuggestPlanner = stats.visitCount >= 3 || stats.activeDayCount >= 3;
-  res.json({ ok: true, ...stats, shouldSuggestPlanner });
+  try {
+    const stats = await db.getVisitStats(email);
+    const shouldSuggestPlanner = stats.visitCount >= 3 || stats.activeDayCount >= 3;
+    res.json({ ok: true, ...stats, shouldSuggestPlanner });
+  } catch (e) {
+    console.error('통계 실패:', e.message);
+    res.status(500).json({ ok: false, error: 'DB_ERROR' });
+  }
 });
 
 // ===== 7) 관리자 페이지: 가입자 · 방문 데이터 확인 =====
@@ -170,7 +190,7 @@ app.get('/api/stats', (req, res) => {
 // 구글시트 셀에 이렇게 입력하면 이 데이터를 그대로 가져와서 표로 만들어줍니다:
 //   =IMPORTDATA("https://[배포주소]/admin/export.csv?key=[ADMIN_KEY]")
 // 구글시트가 몇 시간마다 자동으로 새로고침하고, 시트 메뉴에서 수동 새로고침도 가능합니다.
-app.get('/admin/export.csv', (req, res) => {
+app.get('/admin/export.csv', async (req, res) => {
   const key = String(req.query.key || '');
   const expected = process.env.ADMIN_KEY;
 
@@ -178,7 +198,13 @@ app.get('/admin/export.csv', (req, res) => {
     return res.status(401).send('unauthorized');
   }
 
-  const users = db.getAllUsersOverview();
+  let users;
+  try {
+    users = await db.getAllUsersOverview();
+  } catch (e) {
+    console.error('CSV 조회 실패:', e.message);
+    return res.status(500).send('db error');
+  }
 
   const escapeCsv = (val) => {
     const s = String(val ?? '');
@@ -201,7 +227,7 @@ app.get('/admin/export.csv', (req, res) => {
   res.send('\uFEFF' + lines.join('\n')); // BOM 추가: 한글 깨짐 방지
 });
 
-app.get('/admin', (req, res) => {
+app.get('/admin', async (req, res) => {
   const key = String(req.query.key || '');
   const expected = process.env.ADMIN_KEY;
 
@@ -217,8 +243,14 @@ app.get('/admin', (req, res) => {
     `);
   }
 
-  const totals = db.getTotalStats();
-  const users = db.getAllUsersOverview();
+  let totals, users;
+  try {
+    totals = await db.getTotalStats();
+    users = await db.getAllUsersOverview();
+  } catch (e) {
+    console.error('관리자 조회 실패:', e.message);
+    return res.status(500).send('db error');
+  }
 
   const rows = users.map(u => `
     <tr>
@@ -267,4 +299,9 @@ app.get('/admin', (req, res) => {
 });
 
 const PORT = process.env.PORT || 3000;
-app.listen(PORT, () => console.log(`서버 실행 중: http://localhost:${PORT}`));
+db.init()
+  .then(() => app.listen(PORT, () => console.log(`서버 실행 중: http://localhost:${PORT}`)))
+  .catch((e) => {
+    console.error('DB 초기화 실패 - 서버를 시작하지 않습니다:', e.message);
+    process.exit(1);
+  });

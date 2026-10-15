@@ -1,4 +1,3 @@
-[README.md](https://github.com/user-attachments/files/32429169/README.md)
 # DELE Planner 단어장 - 이메일 인증 백엔드
 
 프론트엔드(vocab-study-app.html)의 "인증번호 받기" 기능을 실제로 작동시키는 서버입니다.
@@ -79,3 +78,15 @@ DNS 전파는 보통 몇 분~1시간 정도 걸립니다.
 - 이메일 발송량이 많아지면(무료 티어 월 3,000통 초과) Resend 유료 플랜으로 전환하면 됩니다.
 - `shouldSuggestPlanner` 판단 기준(방문 3회 또는 활동 3일)은 `server.js`의 `/api/stats` 안에 있는
   한 줄이라 나중에 조건을 얼마든지 정교하게 바꿀 수 있어요.
+
+---
+
+## 저장소: PostgreSQL (Neon)
+
+사용자 데이터는 외부 Postgres에 저장됩니다. Render **Environment**에 아래 값을 추가하세요.
+
+- `DATABASE_URL` : Neon의 접속 주소 (`postgresql://...`). 비밀번호가 들어 있으니 코드/채팅에 공개하지 마세요.
+
+서버가 시작될 때 테이블이 없으면 자동으로 만들고, 서버 폴더에 예전 `data.json`이 남아 있고 DB가 비어 있으면 한 번만 옮겨 담습니다.
+
+복구한 이메일 등록: `DATABASE_URL="..." node scripts/import-emails.js emails.txt --since 2026-09-20` (먼저 `--dry-run`으로 확인)
