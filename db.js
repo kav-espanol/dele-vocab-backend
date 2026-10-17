@@ -107,23 +107,30 @@ async function saveUserData(email, data) {
 }
 
 // ===== 방문 기록 =====
-// hour는 이전과 동일하게 서버 시간대 기준입니다 (동작 변경 없음).
+// 시간대/날짜 계산은 모두 한국 시간(KST, UTC+9) 기준입니다.
+// 서버(Render)는 UTC로 동작하므로 9시간을 더해서 계산합니다.
+const KST_OFFSET_MS = 9 * 60 * 60 * 1000;
+function kstHour(date) { return new Date(date.getTime() + KST_OFFSET_MS).getUTCHours(); }
+function kstDay(date) { return new Date(date.getTime() + KST_OFFSET_MS).toISOString().slice(0, 10); }
+
 async function logVisit(email) {
   const now = new Date();
   await pool.query('INSERT INTO visits (email, ts, hour) VALUES ($1, $2, $3)', [
-    email, now.toISOString(), now.getHours(),
+    email, now.toISOString(), kstHour(now),
   ]);
 }
 
 async function getVisitStats(email) {
   const { rows: visits } = await pool.query(
-    'SELECT ts, hour FROM visits WHERE email = $1 ORDER BY ts ASC',
+    'SELECT ts FROM visits WHERE email = $1 ORDER BY ts ASC',
     [email]
   );
 
+  // 저장된 hour 값 대신 ts에서 한국 시간 기준으로 다시 계산한다.
+  // (이전에 UTC로 저장된 기록도 별도 변환 없이 바르게 집계된다.)
   const buckets = { 아침: 0, 오전: 0, 오후: 0, 저녁: 0, 밤: 0 };
   for (const v of visits) {
-    const h = v.hour;
+    const h = kstHour(v.ts);
     if (h >= 5 && h < 9) buckets['아침']++;
     else if (h >= 9 && h < 12) buckets['오전']++;
     else if (h >= 12 && h < 18) buckets['오후']++;
@@ -135,7 +142,7 @@ async function getVisitStats(email) {
     mostActiveTimeBucket = Object.entries(buckets).sort((a, b) => b[1] - a[1])[0][0];
   }
 
-  const uniqueDays = new Set(visits.map(v => v.ts.toISOString().slice(0, 10)));
+  const uniqueDays = new Set(visits.map(v => kstDay(v.ts)));
 
   return {
     visitCount: visits.length,
