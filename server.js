@@ -217,7 +217,8 @@ app.get('/admin/export.csv', async (req, res) => {
     return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s;
   };
 
-  const header = ['이메일', '가입일', '방문횟수', '학습완료단어수', '마지막방문'];
+  // 기존 5개 열은 그대로 두고, 새 열은 맨 뒤에 붙입니다 (시트의 기존 서식/수식 유지).
+  const header = ['이메일', '가입일', '방문횟수', '학습완료단어수', '마지막방문', '레벨', '학습한레벨'];
   const lines = [header.join(',')];
   for (const u of users) {
     lines.push([
@@ -226,11 +227,57 @@ app.get('/admin/export.csv', async (req, res) => {
       escapeCsv(u.visitCount),
       escapeCsv(u.completedTotal),
       escapeCsv(toKST(u.lastVisit)),
+      escapeCsv(u.level || '미선택'),                       // 마지막으로 고른 레벨
+      escapeCsv(u.learnedLevels.join(' ') || '-'),           // 단어를 1개 이상 학습한 레벨들 (중복 가능)
     ].join(','));
   }
 
   res.set('Content-Type', 'text/csv; charset=utf-8');
   res.send('\uFEFF' + lines.join('\n')); // BOM 추가: 한글 깨짐 방지
+});
+
+// ===== 8-2) 레벨별 요약 CSV: 구글시트의 새 탭에서 IMPORTDATA로 불러옵니다 =====
+//   =IMPORTDATA("https://[배포주소]/admin/levels.csv?key=[ADMIN_KEY]")
+// 모든 날짜 기준은 한국 시간입니다. 학습 경험자가 MIN_SAMPLE명 미만인 레벨은 '데이터 부족'으로 표시합니다.
+const MIN_SAMPLE = 5;
+app.get('/admin/levels.csv', async (req, res) => {
+  const key = String(req.query.key || '');
+  const expected = process.env.ADMIN_KEY;
+  if (!expected || key !== expected) {
+    return res.status(401).send('unauthorized');
+  }
+
+  let summary;
+  try {
+    summary = await db.getLevelSummary();
+  } catch (e) {
+    console.error('레벨 요약 조회 실패:', e.message);
+    return res.status(500).send('db error');
+  }
+
+  const num = (v, d = 1) => (v === null || v === undefined ? '-' : Number(v.toFixed(d)));
+  const pct = (v) => (v === null || v === undefined ? '-' : Math.round(v * 100) + '%');
+  const header = [
+    '레벨', '현재 레벨 인원', '학습 경험 인원', '학습 단어 합계', '1인 평균 학습 단어',
+    '최근7일 학습 단어', '최근7일 학습 인원', '최근7일 출석 비율', '평균 출석일수', '평균 연속 출석일', '데이터',
+  ];
+  const lines = [header.join(',')];
+  for (const r of summary.levels) {
+    lines.push([
+      r.level, r.currentCount, r.learnerCount, r.totalWords, num(r.avgWordsPerLearner),
+      r.recentWords, r.recentActiveLearners, pct(r.active7Rate), num(r.avgAttendanceDays), num(r.avgStreak),
+      r.learnerCount < MIN_SAMPLE ? '데이터 부족' : '충분',
+    ].join(','));
+  }
+  lines.push(['미선택', summary.noLevelCount, '-', '-', '-', '-', '-', '-', '-', '-', '-'].join(','));
+  lines.push(['전체 가입자', summary.totalUsers, '-', '-', '-', '-', '-', '-', '-', '-', '-'].join(','));
+  lines.push('');
+  lines.push(`"* 현재 레벨 = 마지막으로 고른 레벨 / 학습 경험 = 그 레벨 단어를 1개 이상 외운 사람(레벨 중복 가능)"`);
+  lines.push(`"* 평균 출석일수·연속 출석일·출석 비율은 학습 경험 인원 기준, 날짜는 한국 시간 기준"`);
+  lines.push(`"* 학습 경험 인원이 ${MIN_SAMPLE}명 미만이면 평균을 참고용으로만 보세요(데이터 부족)"`);
+
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.send('\uFEFF' + lines.join('\n'));
 });
 
 app.get('/admin', async (req, res) => {

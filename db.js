@@ -172,8 +172,11 @@ async function getAllUsersOverview() {
       completedTotal = Object.values(r.data.completedByLevel)
         .reduce((sum, arr) => sum + (Array.isArray(arr) ? arr.length : 0), 0);
     }
+    const a = analyzeUserData(r.data, kstDay(new Date()));
     return {
       email: r.email,
+      level: a.currentLevel,
+      learnedLevels: a.learnedLevels,
       createdAt: r.created_at.toISOString(),
       updatedAt: r.updated_at.toISOString(),
       visitCount: r.visit_count,
@@ -181,6 +184,90 @@ async function getAllUsersOverview() {
       completedTotal,
     };
   });
+}
+
+
+// ===== 레벨/학습 지속성 분석 =====
+const LEVEL_LIST = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
+
+function addDaysISO(isoDay, delta) {
+  const d = new Date(isoDay + 'T00:00:00Z');
+  d.setUTCDate(d.getUTCDate() + delta);
+  return d.toISOString().slice(0, 10);
+}
+
+// 사용자 한 명의 저장 데이터(data JSON)에서 레벨/학습량/출석 지표를 뽑는다.
+// today: 한국 날짜(YYYY-MM-DD). 모든 기준은 이 날짜 기준이다.
+function analyzeUserData(data, today) {
+  const out = {
+    currentLevel: null,          // 마지막으로 고른 레벨 (없으면 null)
+    learnedLevels: [],           // 단어를 1개 이상 학습한 레벨들 (중복 가능)
+    wordsByLevel: {},            // { A1: 12, ... }
+    recentWordsByLevel: {},      // 최근 7일(오늘 포함) 완료 기록이 있는 단어 수
+    attendanceDays: 0,
+    streak: 0,                   // 오늘 또는 어제까지 이어진 연속 출석일
+    activeLast7: false,          // 최근 7일 안에 출석한 적 있는지
+  };
+  if (!data || typeof data !== 'object') return out;
+
+  if (LEVEL_LIST.includes(data.lastLevel)) out.currentLevel = data.lastLevel;
+
+  const cbl = data.completedByLevel || {};
+  for (const l of LEVEL_LIST) {
+    const n = Array.isArray(cbl[l]) ? cbl[l].length : 0;
+    out.wordsByLevel[l] = n;
+    if (n > 0) out.learnedLevels.push(l);
+  }
+
+  const from7 = addDaysISO(today, -6);
+  const att = new Set(Array.isArray(data.attendance) ? data.attendance.filter(d => /^\d{4}-\d{2}-\d{2}$/.test(d)) : []);
+  out.attendanceDays = att.size;
+  out.activeLast7 = [...att].some(d => d >= from7 && d <= today);
+  let cursor = att.has(today) ? today : addDaysISO(today, -1);
+  while (att.has(cursor)) { out.streak++; cursor = addDaysISO(cursor, -1); }
+
+  for (const l of LEVEL_LIST) out.recentWordsByLevel[l] = 0;
+  const done = data.completedAt && typeof data.completedAt === 'object' ? data.completedAt : {};
+  for (const [key, ts] of Object.entries(done)) {
+    const lvl = String(key).split('|')[0];
+    if (!LEVEL_LIST.includes(lvl)) continue;
+    const t = new Date(ts);
+    if (isNaN(t.getTime())) continue;
+    const day = kstDay(t);
+    if (day >= from7 && day <= today) out.recentWordsByLevel[lvl]++;
+  }
+  return out;
+}
+
+// 레벨별 요약: "현재 레벨"은 마지막으로 고른 레벨, "학습 경험"은 그 레벨 단어를 1개 이상 외운 사람.
+async function getLevelSummary() {
+  const { rows } = await pool.query('SELECT email, data FROM users');
+  const today = kstDay(new Date());
+  const users = rows.map(r => analyzeUserData(r.data, today));
+
+  const result = [];
+  for (const l of LEVEL_LIST) {
+    const current = users.filter(u => u.currentLevel === l);
+    const learners = users.filter(u => u.wordsByLevel[l] > 0);
+    const totalWords = learners.reduce((s, u) => s + u.wordsByLevel[l], 0);
+    const recentWords = users.reduce((s, u) => s + (u.recentWordsByLevel[l] || 0), 0);
+    const recentActiveLearners = users.filter(u => (u.recentWordsByLevel[l] || 0) > 0).length;
+    const avg = (arr, f) => (arr.length ? arr.reduce((s, u) => s + f(u), 0) / arr.length : null);
+    result.push({
+      level: l,
+      currentCount: current.length,
+      learnerCount: learners.length,
+      totalWords,
+      avgWordsPerLearner: learners.length ? totalWords / learners.length : null,
+      recentWords,
+      recentActiveLearners,
+      avgAttendanceDays: avg(learners, u => u.attendanceDays),
+      avgStreak: avg(learners, u => u.streak),
+      active7Rate: learners.length ? learners.filter(u => u.activeLast7).length / learners.length : null,
+    });
+  }
+  const noLevel = users.filter(u => !u.currentLevel).length;
+  return { levels: result, noLevelCount: noLevel, totalUsers: users.length };
 }
 
 async function getTotalStats() {
@@ -192,4 +279,5 @@ async function getTotalStats() {
 module.exports = {
   init, pool,
   loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats,
+  getLevelSummary, analyzeUserData,
 };
