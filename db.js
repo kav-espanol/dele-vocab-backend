@@ -276,8 +276,52 @@ async function getTotalStats() {
   return { totalUsers: u.rows[0].n, totalVisits: v.rows[0].n };
 }
 
+// ===== 주간 순위표 (레벨별, 이번 주 공부한 단어 수) =====
+// 기준: 한국 시간 월요일 00:00 ~ 오늘. 단어를 "학습 완료"로 기록한 시각(completedAt)으로 센다.
+// 별명이 있고, 본인이 순위표 참여(rankOptIn)를 켠 사람만 표시한다. 이번 주 0개인 사람은 제외.
+function cleanNick(s) {
+  return String(s || '').replace(/[<>\u0000-\u001f]/g, '').replace(/\s+/g, ' ').trim().slice(0, 12);
+}
+function kstWeekStart(today) {
+  const dow = new Date(today + 'T00:00:00Z').getUTCDay(); // 0=일 ... 6=토
+  return addDaysISO(today, -((dow + 6) % 7));
+}
+async function getWeeklyLeaderboard(level, email) {
+  if (!LEVEL_LIST.includes(level)) return null;
+  const today = kstDay(new Date());
+  const weekStart = kstWeekStart(today);
+  const { rows } = await pool.query('SELECT email, data FROM users');
+  const entries = [];
+  for (const r of rows) {
+    const d = r.data;
+    if (!d || typeof d !== 'object' || d.rankOptIn !== true) continue;
+    const nick = cleanNick(d.nickname);
+    if (!nick) continue;
+    const done = d.completedAt && typeof d.completedAt === 'object' ? d.completedAt : {};
+    let n = 0;
+    for (const [key, ts] of Object.entries(done)) {
+      if (String(key).split('|')[0] !== level) continue;
+      const t = new Date(ts);
+      if (isNaN(t.getTime())) continue;
+      const day = kstDay(t);
+      if (day >= weekStart && day <= today) n++;
+    }
+    if (n > 0) entries.push({ email: r.email, nickname: nick, words: n });
+  }
+  entries.sort((a, b) => b.words - a.words || a.nickname.localeCompare(b.nickname));
+  let rank = 0, prev = null;
+  entries.forEach((e, i) => { if (e.words !== prev) { rank = i + 1; prev = e.words; } e.rank = rank; });
+  const me = email ? entries.find(e => e.email === email) : null;
+  return {
+    level, weekStart, today,
+    participants: entries.length,
+    top: entries.slice(0, 10).map(e => ({ rank: e.rank, nickname: e.nickname, words: e.words, me: e.email === email })),
+    me: me ? { rank: me.rank, words: me.words } : null,
+  };
+}
+
 module.exports = {
   init, pool,
   loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats,
-  getLevelSummary, analyzeUserData,
+  getLevelSummary, analyzeUserData, getWeeklyLeaderboard,
 };

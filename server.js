@@ -189,6 +189,21 @@ app.get('/api/stats', async (req, res) => {
   }
 });
 
+// ===== 6-2) 주간 순위표: 레벨별 TOP 10 (이번 주 공부한 단어 수) =====
+// 이메일은 "내 순위" 표시에만 쓰이고, 응답에는 다른 사람의 이메일이 들어가지 않습니다.
+app.get('/api/leaderboard', async (req, res) => {
+  const level = String(req.query.level || '').toUpperCase();
+  const email = String(req.query.email || '').trim().toLowerCase();
+  try {
+    const board = await db.getWeeklyLeaderboard(level, isValidEmail(email) ? email : '');
+    if (!board) return res.status(400).json({ ok: false, error: 'INVALID_LEVEL' });
+    res.json({ ok: true, ...board });
+  } catch (e) {
+    console.error('순위표 실패:', e.message);
+    res.status(500).json({ ok: false, error: 'DB_ERROR' });
+  }
+});
+
 // ===== 7) 관리자 페이지: 가입자 · 방문 데이터 확인 =====
 // 브라우저에서 [배포주소]/admin?key=[ADMIN_KEY 환경변수 값] 으로 접속하면 됩니다.
 // 아무나 못 보게 비밀키로 막아뒀어요 — Render 환경변수에 ADMIN_KEY를 꼭 설정하세요.
