@@ -45,8 +45,17 @@ async function init() {
       hour   SMALLINT NOT NULL
     );
     CREATE INDEX IF NOT EXISTS visits_email_idx ON visits (email);
+    CREATE TABLE IF NOT EXISTS quiz_daily (
+      email  TEXT NOT NULL,
+      day    DATE NOT NULL,
+      level  TEXT NOT NULL,   -- A1~C2, 레벨 기록이 없던 옛 기록은 'UNK'
+      n      INT  NOT NULL,   -- 푼 문제 수
+      c      INT  NOT NULL,   -- 맞힌 문제 수
+      PRIMARY KEY (email, day, level)
+    );
   `);
   await importLegacyFileOnce();
+  await backfillQuizDaily();
 }
 
 // 서버 폴더에 예전 data.json이 남아 있고, DB가 비어 있을 때만 한 번 옮깁니다.
@@ -104,7 +113,92 @@ async function saveUserData(email, data) {
      ON CONFLICT (email) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
     [email, data]
   );
+  // 정답률 기록은 앱 쪽에서 14일이 지나면 지워지므로, 서버에 날짜별로 따로 계속 쌓는다.
+  // 실패해도 학습 데이터 저장 자체는 성공으로 둔다.
+  try { await recordQuizDaily(email, data && data.quizLog); }
+  catch (e) { console.error('정답률 일별 기록 실패:', e.message); }
 }
+
+// ===== 정답률 일별 기록 (사용자 × 날짜 × 레벨) =====
+// 앱이 보내는 quizLog = { 'YYYY-MM-DD': { n, c, L: { B1: { n, c }, ... } } }
+// L의 합보다 n이 크면 그 차이는 레벨을 기록하기 전의 풀이라서 'UNK'로 넣는다.
+// 같은 날 기록은 계속 늘어나기만 하므로 GREATEST로 덮어써도 안전하다(여러 번 저장돼도 중복 집계 없음).
+const QUIZ_LEVELS = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
+function quizLogRows(log) {
+  const rows = [];
+  if (!log || typeof log !== 'object' || Array.isArray(log)) return rows;
+  for (const [day, e] of Object.entries(log)) {
+    if (!/^\d{4}-\d{2}-\d{2}$/.test(day) || !e || typeof e !== 'object') continue;
+    const n = Math.floor(Number(e.n)), c = Math.floor(Number(e.c));
+    if (!(n > 0) || !(c >= 0) || c > n) continue;
+    let sumN = 0, sumC = 0;
+    const L = e.L && typeof e.L === 'object' ? e.L : {};
+    for (const lv of QUIZ_LEVELS) {
+      const x = L[lv];
+      if (!x) continue;
+      const ln = Math.floor(Number(x.n)), lc = Math.floor(Number(x.c));
+      if (!(ln > 0) || !(lc >= 0) || lc > ln || sumN + ln > n || sumC + lc > c) continue;
+      rows.push([day, lv, ln, lc]); sumN += ln; sumC += lc;
+    }
+    if (n - sumN > 0) rows.push([day, 'UNK', n - sumN, c - sumC]);
+  }
+  return rows;
+}
+async function recordQuizDaily(email, log) {
+  const rows = quizLogRows(log);
+  for (const [day, lv, n, c] of rows) {
+    await pool.query(
+      `INSERT INTO quiz_daily (email, day, level, n, c) VALUES ($1, $2, $3, $4, $5)
+       ON CONFLICT (email, day, level) DO UPDATE
+       SET n = GREATEST(quiz_daily.n, EXCLUDED.n), c = GREATEST(quiz_daily.c, EXCLUDED.c)`,
+      [email, day, lv, n, c]
+    );
+  }
+}
+// 서버를 켤 때 이미 저장돼 있는 사용자 데이터의 정답률 기록도 한 번 옮겨 담는다(여러 번 해도 결과 같음).
+async function backfillQuizDaily() {
+  try {
+    const { rows } = await pool.query(`SELECT email, data->'quizLog' AS q FROM users WHERE data ? 'quizLog'`);
+    for (const r of rows) await recordQuizDaily(r.email, r.q);
+  } catch (e) { console.error('정답률 백필 실패:', e.message); }
+}
+
+// 사용자별 정답률 요약 (누적 / 최근 7일 / 레벨별)
+async function getAccuracyByUser() {
+  const today = kstDay(new Date());
+  const from7 = addDaysISO(today, -6);
+  const { rows } = await pool.query(
+    `SELECT q.email, q.level, SUM(q.n)::int AS n, SUM(q.c)::int AS c,
+            SUM(CASE WHEN q.day >= $1::date THEN q.n ELSE 0 END)::int AS n7,
+            SUM(CASE WHEN q.day >= $1::date THEN q.c ELSE 0 END)::int AS c7,
+            MAX(q.day)::text AS last_day
+       FROM quiz_daily q GROUP BY q.email, q.level`, [from7]);
+  const { rows: us } = await pool.query(`SELECT email, data->>'nickname' AS nick FROM users`);
+  const nick = new Map(us.map(u => [u.email, u.nick || '']));
+  const by = new Map();
+  for (const r of rows) {
+    const u = by.get(r.email) || { email: r.email, nickname: nick.get(r.email) || '', n: 0, c: 0, n7: 0, c7: 0, lastDay: '', levels: {} };
+    u.n += r.n; u.c += r.c; u.n7 += r.n7; u.c7 += r.c7;
+    if (r.last_day > u.lastDay) u.lastDay = r.last_day;
+    u.levels[r.level] = { n: r.n, c: r.c };
+    by.set(r.email, u);
+  }
+  return [...by.values()].sort((a, b) => b.n - a.n);
+}
+
+// 레벨별 정답률 요약 (전체 사용자 합계)
+async function getAccuracyByLevel() {
+  const today = kstDay(new Date());
+  const from7 = addDaysISO(today, -6);
+  const { rows } = await pool.query(
+    `SELECT level, COUNT(DISTINCT email)::int AS users, SUM(n)::int AS n, SUM(c)::int AS c,
+            SUM(CASE WHEN day >= $1::date THEN n ELSE 0 END)::int AS n7,
+            SUM(CASE WHEN day >= $1::date THEN c ELSE 0 END)::int AS c7
+       FROM quiz_daily GROUP BY level`, [from7]);
+  const { rows: tot } = await pool.query(`SELECT COUNT(DISTINCT email)::int AS users FROM quiz_daily`);
+  return { levels: rows, totalUsers: tot[0].users };
+}
+
 
 // ===== 방문 기록 =====
 // 시간대/날짜 계산은 모두 한국 시간(KST, UTC+9) 기준입니다.
@@ -324,4 +418,5 @@ module.exports = {
   init, pool,
   loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats,
   getLevelSummary, analyzeUserData, getWeeklyLeaderboard,
+  getAccuracyByUser, getAccuracyByLevel, quizLogRows,
 };

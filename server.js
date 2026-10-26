@@ -204,6 +204,57 @@ app.get('/api/leaderboard', async (req, res) => {
   }
 });
 
+// ===== 9) 정답률 CSV (구글시트 IMPORTDATA용) =====
+//   사용자별: =IMPORTDATA("https://[배포주소]/admin/accuracy.csv?key=[ADMIN_KEY]")
+//   레벨별:   =IMPORTDATA("https://[배포주소]/admin/accuracy-levels.csv?key=[ADMIN_KEY]")
+// 퀴즈를 푼 기록이 서버에 쌓이기 시작한 때부터의 값입니다(그 전 기록은 없음). 날짜는 사용자 기기 날짜(한국) 기준.
+const ACC_LEVELS = ['A1', 'A2', 'B1', 'B2', 'C1', 'C2'];
+const accEsc = (val) => { const s = String(val ?? ''); return /[",\n]/.test(s) ? `"${s.replace(/"/g, '""')}"` : s; };
+const accPct = (c, n) => (n > 0 ? Math.round((c / n) * 100) + '%' : '-');
+
+app.get('/admin/accuracy.csv', async (req, res) => {
+  const expected = process.env.ADMIN_KEY;
+  if (!expected || String(req.query.key || '') !== expected) return res.status(401).send('unauthorized');
+  let users;
+  try { users = await db.getAccuracyByUser(); }
+  catch (e) { console.error('정답률 조회 실패:', e.message); return res.status(500).send('db error'); }
+  const header = ['이메일', '별명', '누적 푼 문제', '누적 정답', '총 정답률', '최근7일 푼 문제', '최근7일 정답', '최근7일 정답률', '마지막 퀴즈일']
+    .concat(ACC_LEVELS.map(l => `${l} 푼/정답`), ['레벨미상 푼/정답']);
+  const lines = [header.join(',')];
+  for (const u of users) {
+    const lv = (k) => (u.levels[k] ? `${u.levels[k].n}/${u.levels[k].c}` : '-');
+    lines.push([
+      accEsc(u.email), accEsc(u.nickname), u.n, u.c, accPct(u.c, u.n), u.n7, u.c7, accPct(u.c7, u.n7), u.lastDay,
+      ...ACC_LEVELS.map(lv), lv('UNK'),
+    ].join(','));
+  }
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.send('\uFEFF' + lines.join('\n'));
+});
+
+app.get('/admin/accuracy-levels.csv', async (req, res) => {
+  const expected = process.env.ADMIN_KEY;
+  if (!expected || String(req.query.key || '') !== expected) return res.status(401).send('unauthorized');
+  let r;
+  try { r = await db.getAccuracyByLevel(); }
+  catch (e) { console.error('정답률 조회 실패:', e.message); return res.status(500).send('db error'); }
+  const header = ['레벨', '푼 사람 수', '푼 문제', '정답', '정답률', '최근7일 푼 문제', '최근7일 정답', '최근7일 정답률'];
+  const lines = [header.join(',')];
+  const by = new Map(r.levels.map(x => [x.level, x]));
+  let tn = 0, tc = 0, tn7 = 0, tc7 = 0;
+  for (const k of [...ACC_LEVELS, 'UNK']) {
+    const x = by.get(k) || { users: 0, n: 0, c: 0, n7: 0, c7: 0 };
+    tn += x.n; tc += x.c; tn7 += x.n7; tc7 += x.c7;
+    lines.push([k === 'UNK' ? '레벨미상' : k, x.users, x.n, x.c, accPct(x.c, x.n), x.n7, x.c7, accPct(x.c7, x.n7)].join(','));
+  }
+  lines.push(['전체', r.totalUsers, tn, tc, accPct(tc, tn), tn7, tc7, accPct(tc7, tn7)].join(','));
+  lines.push('');
+  lines.push('"* 레벨미상 = 앱에서 레벨 기록을 시작하기 전에 푼 문제"');
+  lines.push('"* 오늘 단어 퀴즈·복습·오답노트 풀기를 모두 합친 값"');
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.send('\uFEFF' + lines.join('\n'));
+});
+
 // ===== 7) 관리자 페이지: 가입자 · 방문 데이터 확인 =====
 // 브라우저에서 [배포주소]/admin?key=[ADMIN_KEY 환경변수 값] 으로 접속하면 됩니다.
 // 아무나 못 보게 비밀키로 막아뒀어요 — Render 환경변수에 ADMIN_KEY를 꼭 설정하세요.
