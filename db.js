@@ -53,6 +53,13 @@ async function init() {
       c      INT  NOT NULL,   -- 맞힌 문제 수
       PRIMARY KEY (email, day, level)
     );
+    CREATE TABLE IF NOT EXISTS feature_events (
+      id     BIGSERIAL PRIMARY KEY,
+      email  TEXT NOT NULL,
+      name   TEXT NOT NULL,   -- 예: myvocab_open, myvocab_tab_starred
+      ts     TIMESTAMPTZ NOT NULL DEFAULT now()
+    );
+    CREATE INDEX IF NOT EXISTS feature_events_name_idx ON feature_events (name, ts);
   `);
   await importLegacyFileOnce();
   await backfillQuizDaily();
@@ -107,7 +114,28 @@ async function loadUserData(email) {
   return rows[0] ? rows[0].data : null;
 }
 
+// 학습 기록이 갑자기 크게 줄어드는 저장(빈 화면에서 시작한 앱이 서버 기록을 덮어쓰는 사고)을 막기 위한 점수:
+// 학습 완료한 단어 수 + 출석 일수. 앱에서는 이 둘이 줄어들 일이 없다.
+function progressScore(d) {
+  if (!d || typeof d !== 'object') return 0;
+  let n = 0;
+  const c = d.completedByLevel;
+  if (c && typeof c === 'object') Object.values(c).forEach(a => { if (Array.isArray(a)) n += a.length; });
+  if (Array.isArray(d.attendance)) n += d.attendance.length;
+  return n;
+}
+
 async function saveUserData(email, data) {
+  const prev = await pool.query('SELECT data FROM users WHERE email = $1', [email]);
+  if (prev.rows[0] && prev.rows[0].data) {
+    const before = progressScore(prev.rows[0].data);
+    const after = progressScore(data);
+    if (before > 0 && after < before * 0.5) {
+      const err = new Error(`STALE_DATA before=${before} after=${after}`);
+      err.code = 'STALE_DATA';
+      throw err;
+    }
+  }
   await pool.query(
     `INSERT INTO users (email, data) VALUES ($1, $2)
      ON CONFLICT (email) DO UPDATE SET data = EXCLUDED.data, updated_at = now()`,
@@ -414,8 +442,29 @@ async function getWeeklyLeaderboard(level, email) {
   };
 }
 
+// ===== 기능 사용 기록 (내 단어장 탭, 검색 등 어떤 기능을 쓰는지) =====
+// 이메일 + 기능 이름 + 시각만 남긴다(내용은 저장하지 않음).
+const EVENT_NAME_RE = /^[a-z0-9_]{1,40}$/;
+async function logFeatureEvent(email, name) {
+  if (!EVENT_NAME_RE.test(String(name || ''))) return false;
+  await pool.query('INSERT INTO feature_events (email, name) VALUES ($1, $2)', [email, name]);
+  return true;
+}
+async function getFeatureUsage() {
+  const total = await pool.query('SELECT COUNT(*)::int AS n FROM users');
+  const { rows } = await pool.query(`
+    SELECT name,
+           COUNT(DISTINCT email)::int AS users,
+           COUNT(*)::int AS total,
+           COUNT(DISTINCT email) FILTER (WHERE ts > now() - interval '7 days')::int AS users7,
+           COUNT(*) FILTER (WHERE ts > now() - interval '7 days')::int AS total7,
+           MIN(ts) AS first_ts
+    FROM feature_events GROUP BY name ORDER BY name`);
+  return { totalUsers: total.rows[0].n, rows };
+}
+
 module.exports = {
-  init, pool,
+  init, pool, logFeatureEvent, getFeatureUsage,
   loadUserData, saveUserData, logVisit, getVisitStats, getAllUsersOverview, getTotalStats,
   getLevelSummary, analyzeUserData, getWeeklyLeaderboard,
   getAccuracyByUser, getAccuracyByLevel, quizLogRows,

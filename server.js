@@ -135,6 +135,11 @@ app.post('/api/sync/save', async (req, res) => {
     await db.saveUserData(email, req.body.data || {});
     res.json({ ok: true });
   } catch (e) {
+    if (e.code === 'STALE_DATA') {
+      // 서버에 있는 기록보다 훨씬 적은 데이터가 들어와서 덮어쓰기를 거절했다(빈 상태로 시작한 앱 등)
+      console.warn('저장 거절(기록 감소):', email.slice(0, 3) + '***', e.message);
+      return res.status(409).json({ ok: false, error: 'STALE_DATA' });
+    }
     console.error('저장 실패:', e.message);
     res.status(500).json({ ok: false, error: 'DB_ERROR' });
   }
@@ -202,6 +207,51 @@ app.get('/api/leaderboard', async (req, res) => {
     console.error('순위표 실패:', e.message);
     res.status(500).json({ ok: false, error: 'DB_ERROR' });
   }
+});
+
+// ===== 10) 기능 사용 기록 (내 단어장·검색 등을 얼마나 쓰는지) =====
+// 앱에서 기능을 열 때마다 이메일 + 기능 이름만 보낸다. 오류가 나도 학습에는 영향이 없다.
+app.post('/api/log-event', async (req, res) => {
+  const email = String(req.body.email || '').trim().toLowerCase();
+  const name = String(req.body.name || '');
+  if (!isValidEmail(email)) return res.status(400).json({ ok: false, error: 'INVALID_EMAIL' });
+  try {
+    const ok = await db.logFeatureEvent(email, name);
+    if (!ok) return res.status(400).json({ ok: false, error: 'INVALID_EVENT' });
+    res.json({ ok: true });
+  } catch (e) {
+    console.error('이벤트 기록 실패:', e.message);
+    res.status(500).json({ ok: false, error: 'DB_ERROR' });
+  }
+});
+
+//   구글시트:  =IMPORTDATA("https://[배포주소]/admin/events.csv?key=[ADMIN_KEY]")
+const EVENT_LABELS = {
+  myvocab_open: '내 단어장 열기',
+  myvocab_tab_completed: '내 단어장 · 학습 완료 탭',
+  myvocab_tab_starred: '내 단어장 · 즐겨찾기 탭',
+  myvocab_tab_folders: '내 단어장 · 폴더 탭',
+  search_open: '단어 검색 열기',
+  review_open: '복습하기 열기',
+  wrongnotes_open: '오답노트 열기',
+  ranking_open: '다른 학습자 훔쳐보기 열기',
+};
+app.get('/admin/events.csv', async (req, res) => {
+  const expected = process.env.ADMIN_KEY;
+  if (!expected || String(req.query.key || '') !== expected) return res.status(401).send('unauthorized');
+  let r;
+  try { r = await db.getFeatureUsage(); }
+  catch (e) { console.error('이벤트 조회 실패:', e.message); return res.status(500).send('db error'); }
+  const kst = (d) => d ? new Date(new Date(d).getTime() + 9 * 3600 * 1000).toISOString().slice(0, 16).replace('T', ' ') : '';
+  const lines = [['기능', '이름(코드)', '사용한 사람 수', '전체 가입자 대비', '총 횟수', '최근7일 사람 수', '최근7일 횟수', '기록 시작(KST)'].join(',')];
+  for (const x of r.rows) {
+    lines.push([accEsc(EVENT_LABELS[x.name] || x.name), x.name, x.users, accPct(x.users, r.totalUsers), x.total, x.users7, x.total7, kst(x.first_ts)].join(','));
+  }
+  lines.push('');
+  lines.push(`"* 전체 가입자 ${r.totalUsers}명 기준. 이 기능을 넣은 앱 버전을 쓴 사람부터 기록돼요(이전 사용은 없음)"`);
+  lines.push('"* 학습 완료 탭은 내 단어장을 열면 기본으로 보이는 탭이라, 열 때마다 함께 기록돼요(직접 눌러 이동한 건 즐겨찾기·폴더 탭 숫자로 봐요)"');
+  res.set('Content-Type', 'text/csv; charset=utf-8');
+  res.send('\uFEFF' + lines.join('\n'));
 });
 
 // ===== 9) 정답률 CSV (구글시트 IMPORTDATA용) =====
