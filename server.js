@@ -236,6 +236,22 @@ const EVENT_LABELS = {
   wrongnotes_open: '오답노트 열기',
   ranking_open: '다른 학습자 훔쳐보기 열기',
 };
+// ===== 전체 백업 (구글 드라이브 자동 백업용) =====
+// Apps Script가 매일 이 주소를 불러 JSON 파일로 저장합니다. 관리자키가 있어야만 열려요.
+//   [배포주소]/admin/backup.json?key=[ADMIN_KEY]
+app.get('/admin/backup.json', async (req, res) => {
+  const expected = process.env.ADMIN_KEY;
+  if (!expected || String(req.query.key || '') !== expected) return res.status(401).send('unauthorized');
+  try {
+    const users = (await db.pool.query('SELECT * FROM users ORDER BY email')).rows;
+    const visits = (await db.pool.query('SELECT * FROM visits ORDER BY id')).rows;
+    const quizDaily = (await db.pool.query('SELECT * FROM quiz_daily ORDER BY email, day, level')).rows;
+    const featureEvents = (await db.pool.query('SELECT * FROM feature_events ORDER BY id')).rows;
+    res.set('Content-Type', 'application/json; charset=utf-8');
+    res.send(JSON.stringify({ version: 1, createdAt: new Date().toISOString(), counts: { users: users.length, visits: visits.length, quizDaily: quizDaily.length, featureEvents: featureEvents.length }, users, visits, quizDaily, featureEvents }));
+  } catch (e) { console.error('백업 실패:', e.message); res.status(500).send('db error'); }
+});
+
 app.get('/admin/events.csv', async (req, res) => {
   const expected = process.env.ADMIN_KEY;
   if (!expected || String(req.query.key || '') !== expected) return res.status(401).send('unauthorized');
